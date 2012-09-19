@@ -6,7 +6,11 @@ import httplib
 from socket import timeout
 from threading import Thread
 from time import sleep
+import urllib
+import zlib
+from StringIO import StringIO
 
+from tweepy import __version__
 from tweepy.models import Status
 from tweepy.api import API
 from tweepy.error import TweepError
@@ -75,6 +79,7 @@ class Stream(object):
         self.retry_time = options.get("retry_time", 10.0)
         self.snooze_time = options.get("snooze_time",  5.0)
         self.buffer_size = options.get("buffer_size",  1500)
+        self.use_gzip = options.get("gzip", False)
         if options.get("secure", True):
             self.scheme = "https"
         else:
@@ -82,6 +87,9 @@ class Stream(object):
 
         self.api = API()
         self.headers = options.get("headers") or {}
+        if self.use_gzip:
+            self.headers['Accept-Encoding'] = 'deflate, gzip'
+            self.headers['User-Agent'] = 'Tweepy v%s' % __version__
         self.parameters = None
         self.body = None
 
@@ -114,7 +122,11 @@ class Stream(object):
                     sleep(self.retry_time)
                 else:
                     error_counter = 0
-                    self._read_loop(resp)
+                    encoding = resp.getheader('content-encoding', '')
+                    if encoding.strip().lower() == 'gzip':
+                        self._read_gzip_loop(resp)
+                    else:
+                        self._read_loop(resp)
             except timeout:
                 if self.listener.on_timeout() == False:
                     break
@@ -138,6 +150,28 @@ class Stream(object):
         for d in [dt for dt in data.split('\n') if dt]:
             if self.listener.on_data(d) is False:
                 self.running = False
+
+    def _read_gzip_loop(self, resp):
+        decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        data = StringIO()
+        lines = []
+
+        while self.running:
+            if resp.isclosed():
+                break
+            buf = decompressor.decompress(resp.read(self.buffer_size))
+            for c in buf:
+                if c == '\n':
+                    lines.append(data.getvalue().strip())
+                    data = StringIO()
+                else:
+                    data.write(c)
+
+            if len(lines) > 0:
+                for line in lines:
+                    if self.listener.on_data(line) is False:
+                        self.running = False
+                del lines[:]
 
     def _read_loop(self, resp):
 
